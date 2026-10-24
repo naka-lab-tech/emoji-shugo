@@ -1,0 +1,28 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 端末の時計合わせ用（自分の端末IDのドキュメントだけ）
+    match /clients/{clientId} {
+      allow read: if request.auth != null && clientId.matches('^p[a-z0-9]{12,40}$');
+      allow write: if request.auth != null
+        && clientId.matches('^p[a-z0-9]{12,40}$')
+        && request.resource.data.keys().hasOnly(['t', 'ua']);
+    }
+
+    // 部屋の中は、匿名ログイン済みなら誰でも読み書きできる（友人同士で遊ぶ前提）
+    // 部屋コードは英数字4〜8文字。1ドキュメントのフィールド数は40まで。
+    match /rooms/{room}/{document=**} {
+      allow read: if request.auth != null && room.matches('^[A-Z0-9]{4,8}$');
+      allow create, update: if request.auth != null
+        && room.matches('^[A-Z0-9]{4,8}$')
+        && request.resource.data.keys().size() <= 40;
+      allow delete: if request.auth != null && room.matches('^[A-Z0-9]{4,8}$');
+    }
+
+    // それ以外の場所は書けない
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
