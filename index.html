@@ -106,6 +106,7 @@ input:focus,select:focus,button:focus-visible,summary:focus-visible{outline:2px 
 .ld.big{width:16px;height:16px}
 .lanes{display:flex;gap:10px;flex-wrap:wrap;font-size:12px;color:var(--muted);align-items:center}
 .lanes span{display:inline-flex;align-items:center;gap:4px}
+.lanes .btn{display:inline-flex;align-items:center;gap:6px}
 /* 時刻表（便×レーン） */
 .ttwrap{overflow-x:auto;margin:0 -8px;padding:0 8px}
 .tt{display:grid;grid-template-columns:50px repeat(var(--n,1),minmax(38px,1fr));gap:4px;min-width:0}
@@ -338,8 +339,8 @@ a{color:var(--accent)}
             <option value="10">10分に1便</option>
           </select>
         </label>
-        <label>開始時刻（今日・配る人の端末で指定）
-          <input type="time" id="setStart" step="300">
+        <label>開始日時（配る人の端末で指定。翌日以降も可）
+          <input type="datetime-local" id="setStart" step="300">
         </label>
       </div>
     </div>
@@ -353,9 +354,11 @@ a{color:var(--accent)}
             <option value="anon">完全匿名（色なし。かなり難しい）</option>
           </select>
         </label>
+        <label class="chk" id="aiLiveLabel"><input type="checkbox" id="setAiLive"> AI実況（便が締まるたびにClaudeが一言。全員に見えている絵文字だけが材料で、ネタバレなし）</label>
+        <label class="chk" id="ghostLabel"><input type="checkbox" id="setGhost"> AIゴースト（Claudeが1人分の色として混ざり、絵文字を送り続ける。実体はいないので合流できない。終了後に「どの色がAIだったか」を当てる）</label>
+        <p class="lead" id="ghostState"></p>
         <label class="chk"><input type="checkbox" id="setSpurt"> ラストスパート（残り30分は便の間隔が半分）</label>
         <label class="chk"><input type="checkbox" id="setFlare"> のろし（1人1回、自分のスタート地点を全員の地図に公開できる）</label>
-        <label class="chk" id="aiLiveLabel"><input type="checkbox" id="setAiLive"> AI実況（便が締まるたびにClaudeが一言。全員に見えている絵文字だけが材料で、ネタバレなし）</label>
         <p class="lead" id="aiState"></p>
         <label>罰ゲーム（表示用メモ）
           <input id="setPenalty" maxlength="40" placeholder="例：最大グループ以外は一発芸">
@@ -417,7 +420,7 @@ a{color:var(--accent)}
     </div>
     <div class="stat">
       <div><span>開始まで</span><b id="toStart"></b></div>
-      <div><span>開始時刻</span><b id="startClock"></b></div>
+      <div><span>開始日時</span><b id="startClock"></b></div>
     </div>
     <div class="card">
       <h2>今回の設定</h2>
@@ -513,6 +516,16 @@ a{color:var(--accent)}
       <div class="res" id="resList"></div>
       <p class="lead" id="resPenalty"></p>
       <p class="lead" id="resRetired"></p>
+    </div>
+    <div class="card" id="ghostCard" hidden>
+      <h2>どの色がAIだった？</h2>
+      <p class="lead" id="ghostHint">このゲームには、Claudeが1人分の色として混ざっていました。AIだったと思う色を1つ選んでください。全員が選び終わったら、誰かが「正解を発表する」を押します（発表までは答え合わせの名前が伏せられます）。</p>
+      <div class="lanes" id="ghostOpts"></div>
+      <p class="lead" id="ghostVoteState"></p>
+      <button class="btn wide" id="btnGhostReveal">正解を発表する</button>
+      <div class="banner" id="ghostResult" hidden></div>
+      <p class="lead" id="ghostWinners"></p>
+      <p class="err" id="errGhost"></p>
     </div>
     <div class="card" id="aiStoryCard" hidden>
       <h2>AIストーリー</h2>
@@ -853,7 +866,7 @@ function laneDot(i, big){ const s=document.createElement("span"); s.className="l
 window.__test = { graphemes, checkEmoji, pickSpots, rerollSpot, estimate, geo, inPoly, norm, NG_DEFAULT, computeSlots, outcome: null };
 
 /* ---------- 状態 ---------- */
-let db=null, myPid=null, canWrite=true, room=null, metaUnsub=null, aiDocs=[], storyBusy=false, liveTried={}, tickCount=0;
+let db=null, myPid=null, canWrite=true, room=null, metaUnsub=null, aiDocs=[], gvotes=[], storyBusy=false, liveTried={}, ghostTried={}, tickCount=0;
 let gid=null, game=null, players=[], msgs=[], events=[], flares=[], votes=[];
 let ready=false, unsubs=[], lastPhase=null, seenMsgIds=new Set(), seenFlareIds=new Set(), warnedSlot=-1, sending=false;
 const pidOf = s => String(s).replace(/[^A-Za-z0-9_\-.~:@+]/g,"_").slice(0,150) || "anon";
@@ -862,16 +875,19 @@ let actAs = null;
 const isTest = () => !!(game && game.test);
 const actingId = () => (isTest() && actAs && players.some(p=>p.id===actAs)) ? actAs : myPid;
 const me = () => players.find(p=>p.id===actingId());
-const nameOf = pid => (players.find(p=>p.id===pid)||{}).name || "?";
+const ghostHidden = () => !!(game && game.ghost && !game.ghostRevealed);
+const nameOf = pid => { const p=players.find(x=>x.id===pid); if(!p) return "?"; if (p.ghost && ghostHidden()) return "？"; return p.name || "?"; };
+const ghostPlayer = () => players.find(p=>p.ghost);
 const pad = n => String(n).padStart(2,"0");
 const hm = t => { const d=new Date(t); return `${d.getHours()}:${pad(d.getMinutes())}`; };
-function dur(ms){ ms=Math.max(0,ms); const s=Math.floor(ms/1000), h=Math.floor(s/3600), m=Math.floor(s%3600/60), x=s%60; return h? `${h}:${pad(m)}:${pad(x)}` : `${m}:${pad(x)}`; }
+const dateHm = t => { const d=new Date(t), n=new Date(nowMs()); const same = d.getFullYear()===n.getFullYear()&&d.getMonth()===n.getMonth()&&d.getDate()===n.getDate(); return (same?"":`${d.getMonth()+1}/${d.getDate()} `)+hm(t); };
+function dur(ms){ ms=Math.max(0,ms); const s=Math.floor(ms/1000), dd=Math.floor(s/86400), h=Math.floor(s%86400/3600), m=Math.floor(s%3600/60), x=s%60; return dd? `${dd}日 ${h}:${pad(m)}:${pad(x)}` : h? `${h}:${pad(m)}:${pad(x)}` : `${m}:${pad(x)}`; }
 function setErr(id, t){ const e=$(id); e.textContent=t||""; e.className = "err"; }
 function setOk(id, t){ const e=$(id); e.textContent=t||""; e.className = "ok"; }
 function show(id){ for (const v of ["vLoading","vNoDb","vHome","vNoGame","vLobby","vAssigned","vRun","vEnd"]) $(v).hidden = v!==id; }
 const isLane = () => !(game && game.anon==="anon");
 
-const activePlayers = () => players.filter(p=>!p.retired);
+const activePlayers = () => players.filter(p=>!p.retired && !p.ghost);
 const groupId = p => p.group||p.id;
 const membersOf = g => activePlayers().filter(p=>groupId(p)===g);
 const laneOfGroup = g => { const o=players.find(p=>p.id===g); return o ? o.lane : null; };
@@ -985,9 +1001,10 @@ function renderRules(){
     (!g || isLane()) ? "送信者は色で区別されますが、どの色が誰かは分かりません。合流すると、小さい方のグループの色は消えます。" : "誰が送ったかは表示されません。終了後の答え合わせで全部分かります。",
     "会えたら合流コードを入力して合流します。合流は取り消せません。合流後は、グループの誰かが送ればその便の分です。",
   ];
-  if (!g || g.flare!==false) items.push("のろし：1人1回だけ、自分のスタート地点を全員の地図に公開できます。誰のものかは分かりません。");
-  if (!g || g.spurt!==false) items.push("ラストスパート：残り30分は便の間隔が半分になります。");
-  if (g && g.aiLive && aiAvailable()) items.push("AI実況は、全員に見えている絵文字・色・人数だけを材料にしています。位置や名前は渡していません。");
+  if (g && g.flare) items.push("のろし：1人1回だけ、自分のスタート地点を全員の地図に公開できます。誰のものかは分かりません。");
+  if (g && g.spurt) items.push("ラストスパート：残り30分は便の間隔が半分になります。");
+  if (g && g.ghost && aiAvailable()) items.push("AIゴースト：Claudeが1人分の色として混ざり、毎便絵文字を送ります。実体はいないので会えません。終了後に「どの色がAIだったか」を全員で当てます。");
+  if ((!g || g.aiLive!==false) && aiAvailable()) items.push("AI実況は、全員に見えている絵文字・色・人数だけを材料にしています。位置や名前は渡していません。");
   items.push("全員が1つのグループになった時点でゲーム終了、全員の勝ちです。制限時間になったら、一番大きいグループの勝ち。それ以外は罰ゲームです。最大グループが複数なら引き分けです。");
   items.push("リタイアした人は勝敗の集計から外れます。文字・数字入りの絵文字とNG絵文字は送れません。");
   const sig=items.join("\n"); if (ol.dataset.sig===sig) return; ol.dataset.sig=sig;
@@ -999,7 +1016,7 @@ function renderActBar(ph){
   $("actBar").hidden = !on;
   if (!on) return;
   const sel=$("actSel"), cur=actingId();
-  const opts = players.slice().sort((a,b)=>(a.bot?1:0)-(b.bot?1:0)||(a.joinedAt||0)-(b.joinedAt||0));
+  const opts = players.filter(p=>!p.ghost).sort((a,b)=>(a.bot?1:0)-(b.bot?1:0)||(a.joinedAt||0)-(b.joinedAt||0));
   const sig = opts.map(p=>p.id+":"+p.name).join("|");
   if (sel.dataset.sig !== sig){
     sel.textContent="";
@@ -1027,6 +1044,8 @@ function renderLobby(){
   $("btnShareNative").hidden = !navigator.share;
   $("aiState").textContent = aiAvailable() ? "AI機能：利用できます（終了後のAIストーリー、AI実況）。" : "AI機能：未設定です。config.js の aiEndpoint に Cloudflare Worker のURLを入れると使えます。";
   $("setAiLive").disabled = !aiAvailable();
+  $("setGhost").disabled = !aiAvailable() || players.length>=MAX_PLAYERS;
+  $("ghostState").textContent = !aiAvailable() ? "" : players.length>=MAX_PLAYERS ? `AIゴーストは参加${MAX_PLAYERS-1}人以下のときだけ入れられます。` : "";
   const ul = $("pList"); ul.textContent = "";
   for (const p of players.slice().sort((a,b)=>(a.joinedAt||0)-(b.joinedAt||0))){
     const li=document.createElement("li"); li.textContent=p.name + (p.bot?"（ダミー）":""); if(p.id===myPid) li.className="me"; ul.appendChild(li);
@@ -1039,11 +1058,11 @@ function renderLobby(){
   f("setArea", areaOf(game)); f("setMove", game.move||"walk");
   f("setDur", String(game.durationMin||120)); f("setInt", String(game.intervalMin||5));
   f("setAnon", game.anon==="anon"?"anon":"lane");
-  c("setSpurt", game.spurt!==false); c("setFlare", game.flare!==false); c("setAiLive", !!game.aiLive && aiAvailable());
+  c("setSpurt", !!game.spurt); c("setFlare", !!game.flare); c("setAiLive", game.aiLive!==false && aiAvailable()); c("setGhost", !!game.ghost && aiAvailable());
   f("setPenalty", game.penalty||""); f("setNg", game.ngExtra||"");
   c("setTest", isTest()); $("testTools").hidden = !isTest();
   $("btnAssign").textContent = isTest() ? "スタート地点を配って15秒後に開始（テスト）" : "スタート地点を配って開始時刻を確定";
-  if (!$("setStart").value){ const d=new Date(nowMs()+60*60000); d.setMinutes(Math.ceil(d.getMinutes()/5)*5,0,0); $("setStart").value=`${pad(d.getHours())}:${pad(d.getMinutes())}`; }
+  if (!$("setStart").value){ const d=new Date(nowMs()+60*60000); d.setMinutes(Math.ceil(d.getMinutes()/5)*5,0,0); $("setStart").value=`${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`; $("setStart").min=`${new Date(nowMs()).getFullYear()}-${pad(new Date(nowMs()).getMonth()+1)}-${pad(new Date(nowMs()).getDate())}T00:00`; }
   $("ngDefault").textContent = NG_DEFAULT.join(" ");
   $("btnJoin").disabled = canWrite===false || (!m && players.length>=MAX_PLAYERS);
   if (!m && players.length>=MAX_PLAYERS) setErr("errJoin", `定員の${MAX_PLAYERS}人に達しています。`);
@@ -1069,8 +1088,8 @@ function renderPreview(){
 
 function settingsSummary(){
   const code=game.wardResolved;
-  return `参加${activePlayers().length}人 ／ ${wardName(code)} ／ ${moveLabel(game.move)} ／ 制限時間${game.durationMin}分（${hm(game.startAt)}〜${hm(game.endAt)}） ／ ${game.intervalMin}分に1便`
-    + (game.spurt!==false ? "（残り30分は半分）" : "") + (isLane() ? " ／ 色レーン" : " ／ 完全匿名") + (game.flare!==false ? " ／ のろしあり" : "") + (game.aiLive && aiAvailable() ? " ／ AI実況" : "") + (game.penalty?` ／ 罰ゲーム：${game.penalty}`:"");
+  return `参加${activePlayers().length}人 ／ ${wardName(code)} ／ ${moveLabel(game.move)} ／ 制限時間${game.durationMin}分（${dateHm(game.startAt)}〜${hm(game.endAt)}） ／ ${game.intervalMin}分に1便`
+    + (game.spurt ? "（残り30分は半分）" : "") + (isLane() ? " ／ 色レーン" : " ／ 完全匿名") + (game.flare ? " ／ のろしあり" : "") + (game.ghost ? " ／ AIゴーストあり" : "") + (game.aiLive!==false && aiAvailable() ? " ／ AI実況" : "") + (game.penalty?` ／ 罰ゲーム：${game.penalty}`:"");
 }
 
 function renderAssigned(){
@@ -1090,7 +1109,7 @@ function renderAssigned(){
     $("btnReroll").hidden = used || !$("rerollConfirm").hidden; $("rerollDone").hidden = !used;
     if (used) $("rerollConfirm").hidden = true;
   }
-  $("startClock").textContent = hm(game.startAt);
+  $("startClock").textContent = dateHm(game.startAt);
   $("setSummary").textContent = settingsSummary();
   tick();
 }
@@ -1100,7 +1119,7 @@ function renderRun(){
   const retired = !!(m && m.retired);
   $("retiredNotice").hidden = !retired;
   $("sendCard").hidden = !m || retired; $("mergeCard").hidden = !m || retired;
-  $("flareCard").hidden = !m || retired || game.flare===false;
+  $("flareCard").hidden = !m || retired || !game.flare;
   $("retireBox").hidden = !m || retired;
   if (m && !retired){
     const mem = membersOf(groupId(m)), n=mem.length;
@@ -1255,7 +1274,9 @@ function renderEnd(){
   const hasStory = !!(story && story.text);
   $("aiStoryCard").hidden = !aiAvailable();
   $("aiStory").hidden = !hasStory; if (hasStory) renderStory($("aiStory"), story.text);
-  $("aiStoryHint").hidden = hasStory; $("btnStory").hidden = hasStory;
+  $("aiStoryHint").hidden = hasStory; $("btnStory").hidden = hasStory || ghostHidden();
+  if (ghostHidden() && !hasStory) $("aiStoryHint").textContent = "AIゴーストの正解を発表すると、物語を書いてもらえるようになります。";
+  renderGhostCard();
   $("btnStory").disabled = storyBusy; $("btnStory").textContent = storyBusy ? "生成中…（30秒ほどかかります）" : "Claudeに物語を書いてもらう";
   // 表彰
   const live=liveMsgs(); const byId=Object.fromEntries(live.map(x=>[x.id,x]));
@@ -1311,7 +1332,7 @@ function renderEnd(){
   const tr=$("tracks"); tr.textContent="";
   for (const p of players.slice().sort((a,b)=>(a.lane??99)-(b.lane??99))){
     const row=document.createElement("div"); row.className="track";
-    const nm=document.createElement("div"); nm.className="nm"; if (isLane()) nm.append(laneDot(p.lane)); nm.append(p.name); row.appendChild(nm);
+    const nm=document.createElement("div"); nm.className="nm"; if (isLane()) nm.append(laneDot(p.lane)); nm.append(nameOf(p.id)); row.appendChild(nm);
     const seq=document.createElement("div"); seq.className="seq";
     const mine=live.filter(x=>(x.senders||[]).includes(p.id)).sort((a,b)=>a.at-b.at);
     if (!mine.length) seq.textContent="（送信なし）";
@@ -1321,13 +1342,13 @@ function renderEnd(){
 
   const code=game.wardResolved;
   $("endWard").textContent = code ? `${wardName(code)}（${moveLabel(game.move)}）` : "";
-  if (code) drawMap($("endMap"), code, players.filter(p=>p.lat!=null).map(p=>({lat:p.lat,lng:p.lng,label:p.name,color:isLane()?laneCss(p.lane):null})));
+  if (code) drawMap($("endMap"), code, players.filter(p=>p.lat!=null).map(p=>({lat:p.lat,lng:p.lng,label:nameOf(p.id),color:isLane()?laneCss(p.lane):null})));
   $("endMap").hidden = !code;
   const tb=$("stationTbl"); tb.textContent="";
   for (const p of players){
     const trr=document.createElement("tr"); const a=document.createElement("td"), b=document.createElement("td");
     if (isLane()) a.append(laneDot(p.lane), " ");
-    a.append(p.name + ((p.rerolls||0)>0 ? "（引き直しあり）" : "") + (p.retired?"（リタイア）":""));
+    a.append(nameOf(p.id) + ((p.rerolls||0)>0 ? "（引き直しあり）" : "") + (p.retired?"（リタイア）":""));
     if (p.lat!=null){
       const l=document.createElement("a"); l.target="_blank"; l.rel="noopener";
       l.href="https://www.google.com/maps/search/?api=1&query="+encodeURIComponent(`${p.lat},${p.lng}`);
@@ -1367,12 +1388,12 @@ function tick(){
     }
   } else $("clock").textContent = "";
 }
-setInterval(()=>{ if(game){ tick(); if ((++tickCount)%10===0) maybeLive().catch(e=>console.warn(e)); } }, 1000);
+setInterval(()=>{ if(game){ tick(); if ((++tickCount)%10===0){ maybeLive().catch(e=>console.warn(e)); maybeGhost().catch(e=>console.warn(e)); } } }, 1000);
 
 /* ---------- データ購読 ---------- */
 function attach(g){
   unsubs.forEach(u=>{try{u()}catch(e){}}); unsubs=[];
-  gid=g; game=null; players=[]; msgs=[]; events=[]; flares=[]; votes=[]; aiDocs=[]; liveTried={}; seenMsgIds=new Set(); seenFlareIds=new Set(); warnedSlot=-1; sending=false; prevKey="";
+  gid=g; game=null; players=[]; msgs=[]; events=[]; flares=[]; votes=[]; aiDocs=[]; gvotes=[]; liveTried={}; ghostTried={}; seenMsgIds=new Set(); seenFlareIds=new Set(); warnedSlot=-1; sending=false; prevKey="";
   if (!g){ ready=true; return render(); }
   ready=false; render();
   const onErr = e => { console.warn(e); };
@@ -1399,13 +1420,14 @@ function attach(g){
     if(ready) render();
   }, onErr));
   unsubs.push(db.collection(G("votes")).onSnapshot(s=>{ votes=s.docs.map(d=>({id:d.id,...d.data()})); if(ready && lastPhase==="ended") render(); }, onErr));
+  unsubs.push(db.collection(G("ghostvotes")).onSnapshot(s=>{ gvotes=s.docs.map(d=>({id:d.id,...d.data()})); if(ready && lastPhase==="ended") render(); }, onErr));
   unsubs.push(db.collection(G("ai")).onSnapshot(s=>{ aiDocs=s.docs.map(d=>({id:d.id,...d.data()})); if(ready && (lastPhase==="ended"||lastPhase==="running")) render(); }, onErr));
 }
 
 async function createGame(carry){
   const id = "g" + nowMs().toString(36) + Math.random().toString(36).slice(2,6);
-  const base = game ? {area:areaOf(game), move:game.move||"walk", durationMin:game.durationMin, intervalMin:game.intervalMin, anon:game.anon||"lane", spurt:game.spurt!==false, flare:game.flare!==false, penalty:game.penalty||"", ngExtra:game.ngExtra||"", aiLive:!!game.aiLive, test:!!game.test}
-                    : {area:"random", move:"walk", durationMin:120, intervalMin:5, anon:"lane", spurt:true, flare:true, penalty:"", ngExtra:"", aiLive:false, test:false};
+  const base = game ? {area:areaOf(game), move:game.move||"walk", durationMin:game.durationMin, intervalMin:game.intervalMin, anon:game.anon||"lane", spurt:!!game.spurt, flare:!!game.flare, ghost:!!game.ghost, penalty:game.penalty||"", ngExtra:game.ngExtra||"", aiLive:game.aiLive!==false, test:!!game.test}
+                    : {area:"random", move:"walk", durationMin:120, intervalMin:5, anon:"lane", spurt:false, flare:false, ghost:false, penalty:"", ngExtra:"", aiLive:true, test:false};
   const keep = carry ? players.filter(p=>!p.bot || base.test).map(p=>({id:p.id,name:p.name,joinedAt:p.joinedAt||nowMs(),bot:!!p.bot,rc:p.rc||randCode(6)})) : [];
   await db.doc(`rooms/${room}/games/${id}`).set({...base, status:"lobby", createdAt:nowMs()});
   for (const p of keep) await db.doc(`rooms/${room}/games/${id}/players/${p.id}`).set({name:p.name, joinedAt:p.joinedAt, bot:p.bot, rc:p.rc});
@@ -1441,6 +1463,7 @@ saveSetting("setAnon","anon",el=>el.value);
 saveSetting("setSpurt","spurt",el=>el.checked);
 saveSetting("setFlare","flare",el=>el.checked);
 saveSetting("setAiLive","aiLive",el=>el.checked);
+saveSetting("setGhost","ghost",el=>el.checked);
 saveSetting("setPenalty","penalty",el=>el.value.trim().slice(0,40));
 saveSetting("setNg","ngExtra",el=>graphemes(el.value).join("").slice(0,60));
 
@@ -1467,10 +1490,12 @@ $("btnSkipEnd").onclick = () => guard("errTest", () => db.doc(G()).update({endAt
 
 function plannedStart(){
   if (isTest()) return nowMs()+15000;
-  const [hh,mm] = ($("setStart").value||"").split(":").map(Number);
-  if (isNaN(hh)) fail("開始時刻を入れてください。");
-  const d=new Date(); d.setHours(hh,mm,0,0);
-  if (d.getTime() < nowMs()+60000) fail("開始時刻は今より1分以上あとにしてください。");
+  const v=$("setStart").value||"";
+  const m=v.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
+  if (!m) fail("開始日時を入れてください。");
+  const d=new Date(+m[1], +m[2]-1, +m[3], +m[4], +m[5], 0, 0);
+  if (d.getTime() < nowMs()+60000) fail("開始日時は今より1分以上あとにしてください。");
+  if (d.getTime() > nowMs()+14*86400000) fail("開始日時は2週間以内にしてください。");
   return d.getTime();
 }
 async function assignNow(startAt){
@@ -1483,12 +1508,15 @@ async function assignNow(startAt){
   if (ps.length>MAX_PLAYERS) fail(`参加者が${MAX_PLAYERS}人を超えています。誰かに抜けてもらってください。`);
   const g = fresh.data();
   const ward = areaOf(g)==="random" ? WARDS[rnd(WARDS.length)].c : g.area;
-  const sts = pickSpots(ward, ps.length);
-  if (sts.length<ps.length) fail("スタート地点を作れませんでした。もう一度押してください。");
+  const withGhost = !!g.ghost && aiAvailable() && ps.length < MAX_PLAYERS;
+  const n = ps.length + (withGhost?1:0);
+  const sts = pickSpots(ward, n);
+  if (sts.length<n) fail("スタート地点を作れませんでした。もう一度押してください。");
   const codes = new Set(); while(codes.size<ps.length) codes.add(String(1000+rnd(9000)));
-  const cl=[...codes], lanes=shuffle([...Array(LANES.length).keys()]).slice(0,ps.length);
+  const cl=[...codes], lanes=shuffle([...Array(LANES.length).keys()]).slice(0,n);
   for (let i=0;i<ps.length;i++) await db.doc(G("players/"+ps[i].id)).update({lat:sts[i].lat, lng:sts[i].lng, rerolls:0, code:cl[i], group:ps[i].id, lane:lanes[i], retired:false});
-  await db.doc(G()).update({status:"assigned", wardResolved:ward, startAt, endAt:startAt+g.durationMin*60000});
+  if (withGhost) await db.doc(G("players/ghost")).set({name:"AIゴースト", ghost:true, joinedAt:nowMs(), lat:sts[ps.length].lat, lng:sts[ps.length].lng, rerolls:0, group:"ghost", lane:lanes[ps.length], retired:false});
+  await db.doc(G()).update({status:"assigned", wardResolved:ward, startAt, endAt:startAt+g.durationMin*60000, ghost:withGhost, ghostRevealed:false});
 }
 $("btnAssign").onclick = () => guard("errAssign", async () => {
   const startAt=plannedStart();
@@ -1685,6 +1713,69 @@ async function maybeLive(){
   await ref.set({text:String(text).replace(/\s+/g," ").trim().slice(0,120), at:nowMs(), slot:prev});
 }
 
+/* ---------- AI：ゴーストの送信 ---------- */
+const SAFE_EMOJI = ["🌳","🏪","🚉","⛩️","🏫","🌉","🍜","☕","🏥","🛝","🚏","🏢","🌸","🚲","🐈","🍞"];
+function ghostJitter(slot){ let h=0; const s=String(gid)+":"+slot; for (const ch of s) h=(h*31+ch.charCodeAt(0))>>>0; return 0.15+ (h%1000)/1000*0.6; }
+function wardQuadrant(p){
+  const Gd=geo(game.wardResolved); if(!Gd) return "";
+  const [x,y]=fromLL(Gd,p); const fx=(x-Gd.minX)/(Gd.maxX-Gd.minX), fy=(y-Gd.minY)/(Gd.maxY-Gd.minY);
+  const ns = fy>0.66?"北":fy<0.34?"南":""; const ew = fx>0.66?"東":fx<0.34?"西":"";
+  return (ns+ew) ? (ns+ew)+"部" : "中央部";
+}
+async function maybeGhost(){
+  if (!game || !game.ghost || !aiAvailable() || lastPhase!=="running" || !db) return;
+  const gp=ghostPlayer(); if (!gp) return;
+  const s=slotNow();
+  const st=slotStart(s), en=slotEnd(s);
+  if (nowMs() < st + (en-st)*ghostJitter(s)) return;
+  if (liveMsgs().some(x=>x.slot===s && x.group==="ghost")) return;
+  if (nowMs()-(ghostTried[s]||0) < 45000) return; ghostTried[s]=nowMs();
+  const ref=db.doc(G(`msgs/s${s}-ghost`));
+  const lease=await ref.acquire({holder:myPid, ttlMs:40000}); if (!lease.acquired) return;
+  const cur=await ref.get(); if (cur.exists && cur.data() && cur.data().emojis) return;
+  const Ln = x => isLane() ? laneName(x.lane) : null;
+  const mine = liveMsgs().filter(x=>x.group==="ghost").sort((a,b)=>a.at-b.at).map(x=>x.emojis);
+  const others = liveMsgs().filter(x=>x.group!=="ghost" && x.slot>=s-3).sort((a,b)=>a.at-b.at).map(x=>({slot:x.slot+1, lane:Ln(x), emojis:x.emojis, size:x.size}));
+  const data = { slot:s+1, totalSlots: slots().starts.length, remainMin: Math.max(0, Math.round((game.endAt-nowMs())/60000)), ward: wardName(game.wardResolved), area: wardQuadrant(gp), lane: isLane(), myLane: Ln(gp), mine, others, ng: NG_DEFAULT.concat(graphemes(game.ngExtra||"")).join("") };
+  let text="";
+  try { text = await callAi("ghost", data); } catch(e){ console.warn(e); }
+  let gs = graphemes(text).filter(g=>!checkEmoji(g, ngSet()));
+  let emoji = gs[0];
+  if (!emoji){ const pool=SAFE_EMOJI.filter(e=>!mine.includes(e)); emoji = pool[Math.floor(Math.random()*pool.length)] || "🌳"; }
+  await ref.set({at:nowMs(), slot:s, emojis:emoji, size:1, group:"ghost", lane:gp.lane, senders:["ghost"]});
+}
+
+/* ---------- ゴースト当て ---------- */
+function renderGhostCard(){
+  const on = !!(game && game.ghost && ghostPlayer());
+  $("ghostCard").hidden = !on; if (!on) return;
+  const revealed = !!game.ghostRevealed, gp=ghostPlayer();
+  const me0=me(); const myV=gvotes.find(v=>v.id===actingId());
+  const lanesPresent=[...new Set(players.filter(p=>p.lane!=null).map(p=>p.lane))].sort((a,b)=>a-b);
+  const box=$("ghostOpts"); box.textContent="";
+  for (const l of lanesPresent){
+    const btn=document.createElement("button"); btn.className="btn sm ghost"+(myV && myV.lane===l?" on":"");
+    btn.append(laneDot(l)); btn.append(laneName(l) + (revealed && l===gp.lane ? "（正解）" : ""));
+    btn.disabled = revealed || !me0 || canWrite===false || (me0 && me0.lane===l);
+    btn.onclick = () => guard("errGhost", () => db.doc(G("ghostvotes/"+actingId())).set({lane:l, at:nowMs()}));
+    box.appendChild(btn);
+  }
+  const voters=activePlayers().length;
+  $("ghostVoteState").textContent = revealed ? "" : `投票済み：${gvotes.length}／${voters}人` + (myV ? "（あなたも投票済み。変更できます）" : me0 ? "（自分の色は選べません）" : "");
+  $("btnGhostReveal").hidden = revealed || canWrite===false;
+  $("ghostHint").hidden = revealed;
+  $("ghostResult").hidden = !revealed;
+  if (revealed){
+    const r=$("ghostResult"); r.textContent=""; r.append("AIゴーストは "); r.append(laneDot(gp.lane,true)); r.append(` ${laneName(gp.lane)} でした`);
+    const ok=gvotes.filter(v=>v.lane===gp.lane).map(v=>nameOf(v.id)), ng=gvotes.filter(v=>v.lane!==gp.lane).map(v=>nameOf(v.id));
+    $("ghostWinners").textContent = (ok.length ? `正解：${ok.join("・")}` : "正解者なし。全員だまされました。") + (ng.length ? ` ／ はずれ：${ng.join("・")}` : "");
+  } else $("ghostWinners").textContent="";
+}
+$("btnGhostReveal").onclick = () => guard("errGhost", async () => {
+  if (!game || !game.ghost) return;
+  await db.doc(G()).update({ghostRevealed:true, ghostRevealedAt:nowMs()});
+});
+
 /* ---------- AI：終了後のストーリー ---------- */
 function renderStory(el, text){
   el.textContent="";
@@ -1710,7 +1801,8 @@ function storyPayload(){
     ward: wardName(game.wardResolved), move: moveLabel(game.move), durationMin: game.durationMin, intervalMin: game.intervalMin,
     startAt: hm(game.startAt), endAt: hm(game.endAt), together: allTogether(), togetherAt: allTogether() ? hm(lastMergeAt()||game.endAt) : null,
     lane: isLane(),
-    players: players.map(p=>({name:p.name, lane:L(p), retired:!!p.retired, rerolled:(p.rerolls||0)>0})),
+    players: players.map(p=>({name:p.name, lane:L(p), retired:!!p.retired, rerolled:(p.rerolls||0)>0, ghost:!!p.ghost})),
+    ghostGuess: game.ghost ? { correct: gvotes.filter(v=>v.lane===(ghostPlayer()||{}).lane).map(v=>nameOf(v.id)), wrong: gvotes.filter(v=>v.lane!==(ghostPlayer()||{}).lane).map(v=>nameOf(v.id)) } : null,
     msgs: liveMsgs().sort((a,b)=>a.at-b.at).map(x=>({time:hm(x.at), slot:x.slot+1, by:(x.senders||[]).map(nameOf), emojis:x.emojis})),
     merges: events.filter(e=>e.type==="merge").sort((a,b)=>a.at-b.at).map(e=>({time:hm(e.at), a:(e.a||[]).map(nameOf), b:(e.b||[]).map(nameOf)})),
     flares: flares.slice().sort((a,b)=>a.at-b.at).map(f=>({time:hm(f.at), by:nameOf(f.id)})),
