@@ -78,6 +78,16 @@ input:focus,select:focus,button:focus-visible,summary:focus-visible{outline:2px 
 .pt-l{fill:var(--ink);stroke:var(--card);stroke-width:3;paint-order:stroke;vector-effect:non-scaling-stroke;font-weight:700}
 .pt-eb{fill:var(--card);stroke:var(--line);stroke-width:1;vector-effect:non-scaling-stroke;opacity:.92}
 .pt-e{font-family:var(--emoji),var(--font)}
+/* 軌跡 */
+.tr{fill:none;stroke:var(--accent);stroke-width:2.5;stroke-linejoin:round;stroke-linecap:round;vector-effect:non-scaling-stroke;opacity:.85}
+.tr-dash{stroke-dasharray:4 3}
+.pt-head{stroke:var(--card);stroke-width:2;vector-effect:non-scaling-stroke}
+.trackbar{display:flex;gap:10px;align-items:center}
+.trackbar input[type=range]{flex:1;min-width:0}
+.trackbar .t{font-variant-numeric:tabular-nums;font-size:13px;min-width:5.5em}
+.trackLegend{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:13px}
+.trackLegend .sw{display:inline-block;width:14px;height:4px;border-radius:2px;margin-right:4px;vertical-align:middle}
+.nearList{margin:0;padding-left:20px;font-size:14px;display:flex;flex-direction:column;gap:4px}
 /* 過去のゲーム */
 .pastbar{background:var(--accent-soft);border-color:var(--accent);flex-direction:row;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
 .pastbar .lead{margin:0;color:var(--ink);font-weight:600}
@@ -238,6 +248,13 @@ a{color:var(--accent)}
   <div class="card pastbar" id="pastBar" hidden>
     <p class="lead" id="pastLead"></p>
     <button class="btn sm" id="btnPastBack">いまのゲームに戻る</button>
+  </div>
+
+  <div class="card" id="trackCard" hidden>
+    <h2>位置情報の記録</h2>
+    <p class="lead">このゲームは位置情報の記録がオンです。ゲーム中は誰にも見えません（終了後に全員の軌跡が見られます）。記録されるのはこのページを開いている間だけなので、「新着を音とバイブで知らせる」をオンにして画面が消えないようにしておくのがおすすめです。</p>
+    <p class="lead" id="trackState"></p>
+    <button class="btn wide" id="btnTrackStart">記録を開始する（位置情報を許可）</button>
   </div>
 
   <div class="card actbar" id="actBar" hidden>
@@ -404,6 +421,7 @@ a{color:var(--accent)}
         <p class="lead" id="ghostState"></p>
         <label class="chk"><input type="checkbox" id="setSpurt"> ラストスパート（残り30分は便の間隔が半分）</label>
         <label class="chk"><input type="checkbox" id="setFlare"> のろし（1人1回、自分のスタート地点を全員の地図に公開できる）</label>
+        <label class="chk"><input type="checkbox" id="setTrack"> 位置情報の記録（各自のスマホで30秒ごとに現在地を記録。ゲーム中は非公開、終了後に全員の軌跡リプレイと「すれ違い」が見られる）</label>
         <p class="lead" id="aiState"></p>
         <label>罰ゲーム（表示用メモ）
           <input id="setPenalty" maxlength="40" placeholder="例：最大グループ以外は一発芸">
@@ -608,6 +626,25 @@ a{color:var(--accent)}
       </div>
       <p class="lead" id="voteState"></p>
     </div>
+    <div class="card" id="replayCard" hidden>
+      <h2>移動の軌跡（位置情報）</h2>
+      <p class="lead" id="replayEmpty">記録された軌跡はありません（位置情報を許可した端末がなかったか、まだ読み込み中です）。</p>
+      <div id="replayBody" hidden>
+        <p class="lead">スライダーを動かすと、その時刻までの動きが見られます。絵文字は送った地点に置いています。</p>
+        <div class="mapbox big" id="trackMap"></div>
+        <div class="trackbar"><button class="btn sm" id="btnTrackPlay">▶ 再生</button><input type="range" id="trackSlider" min="0" max="1000" value="1000"><span class="t" id="trackTime"></span></div>
+        <div class="trackLegend" id="trackLegend"></div>
+        <h3 style="margin:12px 0 4px;font-size:14px">すれ違い（100m以内まで近づいたのに会えなかった瞬間）</h3>
+        <p class="lead" id="nearEmpty">すれ違いはありませんでした。</p>
+        <ol class="nearList" id="nearList"></ol>
+        <div id="arriveWrap">
+          <h3 style="margin:12px 0 4px;font-size:14px">ランドマークへの到着</h3>
+          <p class="lead" id="arriveEmpty">ランドマークの120m以内に入った記録はありませんでした。</p>
+          <ol class="nearList" id="arriveList"></ol>
+        </div>
+        <p class="lead">スマホの位置情報は数十mずれることがあるため、距離は目安です。画面を閉じていた間は記録がなく、線がつながらないことがあります。</p>
+      </div>
+    </div>
     <div class="card">
       <h2>答え合わせ</h2>
       <p class="lead">どの絵文字を誰が送ったか、いつ誰と誰が合流したか。</p>
@@ -756,11 +793,19 @@ async function connect(){
 
 /* ---------- AI（Cloudflare Worker 経由で Claude API） ---------- */
 const aiAvailable = () => !!(CFG.aiEndpoint && /^https:\/\//.test(CFG.aiEndpoint));
-async function callAi(kind, data){
+async function callAi(kind, data, timeoutMs){
   if (!aiAvailable()) throw new Error("AIの設定がありません。");
-  const res = await fetch(CFG.aiEndpoint, { method:"POST", headers:{ "content-type":"application/json" }, body: JSON.stringify({ kind, data }) });
+  const ac = new AbortController(); const tm = setTimeout(()=>ac.abort(), timeoutMs || (kind==="story" ? 170000 : 40000));
+  let res;
+  try {
+    res = await fetch(CFG.aiEndpoint, { method:"POST", headers:{ "content-type":"application/json" }, body: JSON.stringify({ kind, data }), signal: ac.signal, keepalive:false });
+  } catch(err){
+    const e = new Error(err && err.name==="AbortError" ? "AIサーバーの応答が時間内に返りませんでした。電波の良い場所で、画面を閉じずにもう一度押してください。" : `AIサーバーに接続できませんでした（${err && err.message || "通信エラー"}）。電波の状態を確認して、もう一度押してください。`);
+    e.userMsg = e.message; e.cause = err; throw e;
+  } finally { clearTimeout(tm); }
   let j = null; try { j = await res.json(); } catch(e){}
-  if (!res.ok || !j || typeof j.text !== "string") { const e = new Error((j && j.error) || `AIサーバーがエラーを返しました（${res.status}）`); e.userMsg = e.message; throw e; }
+  if (!res.ok || !j || typeof j.text !== "string") { const e = new Error((j && j.error ? `AIサーバーのエラー：${j.error}` : `AIサーバーがエラーを返しました（HTTP ${res.status}）`)); e.userMsg = e.message; throw e; }
+  if (!j.text.trim()) { const e = new Error("AIの返答が空でした。もう一度押してください。"); e.userMsg = e.message; throw e; }
   return j.text;
 }
 
@@ -865,8 +910,8 @@ function estimate(code, n){
   return estCache[key] = nn/runs;
 }
 
-/* 地図SVG：points = [{lat,lng,label,me}] */
-function mapSVG(code, points){
+/* 地図SVG：points = [{lat,lng,label,me,color,emoji,small,head}]、lines = [{pts:[{lat,lng}], color, dash}] */
+function mapSVG(code, points, lines){
   const G=geo(code); if(!G) return "";
   const pad=0.35, w=G.maxX-G.minX+pad*2, h=G.maxY-G.minY+pad*2, span=Math.max(w,h);
   const X=x=>(x-G.minX+pad).toFixed(3), Y=y=>(G.maxY+pad-y).toFixed(3);
@@ -877,18 +922,24 @@ function mapSVG(code, points){
     s += `<text class="wex-l" x="${X((b.x0+b.x1)/2)}" y="${Y((b.y0+b.y1)/2)}" font-size="${(span*0.03).toFixed(3)}" text-anchor="middle" dominant-baseline="middle">${b.name}</text>`;
   }
   const r=span*0.016, fs=span*0.038;
+  for (const L of lines||[]){
+    const pts=(L.pts||[]).filter(q=>q && q.lat!=null); if (pts.length<2) continue;
+    const d="M"+pts.map(q=>{ const [x,y]=fromLL(G,q); return X(x)+" "+Y(y); }).join("L");
+    s += `<path class="tr${L.dash?" tr-dash":""}" d="${d}"${L.color?` style="stroke:${L.color}"`:""}/>`;
+  }
   for (const p of points||[]){
     const [x,y]=fromLL(G,p);
     const st = p.color ? ` style="fill:${p.color}"` : "", stR = p.color ? ` style="stroke:${p.color}"` : "";
-    if (p.emoji){ s += `<circle class="pt-eb" cx="${X(x)}" cy="${Y(y)}" r="${(r*2.4).toFixed(3)}"/><text class="pt-e" x="${X(x)}" y="${Y(y)}" font-size="${(span*0.06).toFixed(3)}" text-anchor="middle" dominant-baseline="central">${p.emoji}</text>`; continue; }
+    if (p.emoji){ const k=p.small?0.6:1; s += `<circle class="pt-eb" cx="${X(x)}" cy="${Y(y)}" r="${(r*2.4*k).toFixed(3)}"/><text class="pt-e" x="${X(x)}" y="${Y(y)}" font-size="${(span*0.06*k).toFixed(3)}" text-anchor="middle" dominant-baseline="central">${p.emoji}</text>`; continue; }
+    if (p.head){ s += `<circle class="pt-head" cx="${X(x)}" cy="${Y(y)}" r="${(r*1.5).toFixed(3)}"${st}/>`; if (p.label) s += `<text class="pt-l" x="${X(x)}" y="${(Y(y)-r*2.2).toFixed(3)}" font-size="${fs.toFixed(3)}" text-anchor="middle"></text>`; continue; }
     if (p.me) s += `<circle class="pt-ring" cx="${X(x)}" cy="${Y(y)}" r="${(r*2.6).toFixed(3)}"${stR}/>`;
     s += `<circle class="pt" cx="${X(x)}" cy="${Y(y)}" r="${(p.me?r*1.3:r).toFixed(3)}"${st}/>`;
     if (p.label) s += `<text class="pt-l" x="${X(x)}" y="${(Y(y)-r*1.8).toFixed(3)}" font-size="${fs.toFixed(3)}" text-anchor="middle"></text>`;
   }
   return s+"</svg>";
 }
-function drawMap(el, code, points){
-  el.innerHTML = mapSVG(code, points);
+function drawMap(el, code, points, lines){
+  el.innerHTML = mapSVG(code, points, lines);
   const ts = el.querySelectorAll("text.pt-l");
   (points||[]).filter(p=>p.label).forEach((p,i)=>{ if (ts[i]) ts[i].textContent = p.label; });
 }
@@ -1131,6 +1182,7 @@ function render(){
   if (ph==="running") pill.classList.add("warn");
   if (isTest()) pill.textContent += "（テスト）";
   renderActBar(ph);
+  renderTrackCard();
   renderNotifyButtons();
   if (ph==="loading") return show("vLoading");
   if (ph==="noroom"){ renderHome(); return show("vHome"); }
@@ -1153,6 +1205,7 @@ function renderRules(){
   ];
   if (!g || (g.status==="lobby" ? (g.lm==null?7:g.lm)>0 : lmList().length>0)) items.push("ランドマーク：区内の有名スポットに絵文字が割り当てられ、全員が同じ一覧を見ます。その絵文字を送れば「そこにいる／そこへ向かう」と伝わります。送る義務はなく、別の意味で使ってもOKです。");
   if (g && g.flare) items.push("のろし：1人1回だけ、自分のスタート地点を全員の地図に公開できます。誰のものかは分かりません。");
+  if (g && g.track) items.push("位置情報の記録：各自のスマホが30秒ごとに現在地を記録します（ページを開いている間だけ）。ゲーム中は誰にも見えません。終了後に全員の軌跡をリプレイでき、100m以内まで近づいたのに会えなかった「すれ違い」も分かります。");
   if (g && g.spurt) items.push("ラストスパート：残り30分は便の間隔が半分になります。");
   if (g && g.ghost && aiAvailable()) items.push("AIゴースト：Claudeが1人分の色として混ざり、毎便絵文字を送ります。実体はいないので会えません。終了後に「どの色がAIだったか」を全員で当てます。");
   if ((!g || g.aiLive!==false) && aiAvailable()) items.push("AI実況は、全員に見えている絵文字・色・人数だけを材料にしています。位置や名前は渡していません。");
@@ -1210,7 +1263,7 @@ function renderLobby(){
   f("setDur", String(game.durationMin||120)); f("setInt", String(game.intervalMin||5));
   f("setAnon", game.anon==="anon"?"anon":"lane");
   f("setLm", String(game.lm==null?7:game.lm)); f("setLmMode", game.lmMode==="cat"?"cat":"unique");
-  c("setSpurt", !!game.spurt); c("setFlare", !!game.flare); c("setAiLive", game.aiLive!==false && aiAvailable()); c("setGhost", !!game.ghost && aiAvailable());
+  c("setSpurt", !!game.spurt); c("setFlare", !!game.flare); c("setTrack", !!game.track); c("setAiLive", game.aiLive!==false && aiAvailable()); c("setGhost", !!game.ghost && aiAvailable());
   f("setPenalty", game.penalty||""); f("setNg", game.ngExtra||"");
   c("setTest", isTest()); $("testTools").hidden = !isTest();
   $("btnAssign").textContent = isTest() ? "スタート地点を配って15秒後に開始（テスト）" : "スタート地点を配って開始時刻を確定";
@@ -1242,7 +1295,7 @@ function renderPreview(){
 function settingsSummary(){
   const code=game.wardResolved;
   return `参加${activePlayers().length}人 ／ ${wardName(code)} ／ ${moveLabel(game.move)} ／ 制限時間${game.durationMin}分（${dateHm(game.startAt)}〜${hm(game.endAt)}） ／ ${game.intervalMin}分に1便`
-    + (game.spurt ? "（残り30分は半分）" : "") + (isLane() ? " ／ 色レーン" : " ／ 完全匿名") + (game.flare ? " ／ のろしあり" : "") + (game.ghost ? " ／ AIゴーストあり" : "") + (lmList().length ? ` ／ ランドマーク${lmList().length}か所` : "") + (game.aiLive!==false && aiAvailable() ? " ／ AI実況" : "") + (game.penalty?` ／ 罰ゲーム：${game.penalty}`:"");
+    + (game.spurt ? "（残り30分は半分）" : "") + (isLane() ? " ／ 色レーン" : " ／ 完全匿名") + (game.flare ? " ／ のろしあり" : "") + (game.track ? " ／ 位置情報の記録あり" : "") + (game.ghost ? " ／ AIゴーストあり" : "") + (lmList().length ? ` ／ ランドマーク${lmList().length}か所` : "") + (game.aiLive!==false && aiAvailable() ? " ／ AI実況" : "") + (game.penalty?` ／ 罰ゲーム：${game.penalty}`:"");
 }
 
 function renderAssigned(){
@@ -1272,6 +1325,7 @@ function renderAssigned(){
   }
   $("startClock").textContent = dateHm(game.startAt);
   $("setSummary").textContent = settingsSummary();
+  renderTrackCard();
   tick();
 }
 
@@ -1300,11 +1354,13 @@ function renderRun(){
   $("lmRunCard").hidden = !lmOn;
   if (lmOn){
     const from = (m && m.lat!=null && !retired) ? {lat:m.lat,lng:m.lng} : null;
-    const key = game.wardResolved+":"+lmList().map(l=>l.e).join("")+":"+(from?from.lat+","+from.lng:"");
-    if ($("lmRunMap").dataset.key!==key){ $("lmRunMap").dataset.key=key; drawMap($("lmRunMap"), game.wardResolved, lmPoints().concat(from?[{...from,me:true}]:[])); renderLmList($("lmRunList"), from); }
+    const here = (trackOn() && geoLast && m && m.id===myPid && !retired) ? {lat:geoLast.lat, lng:geoLast.lng, head:true, color:"var(--accent)", label:"いま"} : null;
+    const key = game.wardResolved+":"+lmList().map(l=>l.e).join("")+":"+(from?from.lat+","+from.lng:"")+":"+(here?Math.round(geoLast.t/30000):"");
+    if ($("lmRunMap").dataset.key!==key){ $("lmRunMap").dataset.key=key; drawMap($("lmRunMap"), game.wardResolved, lmPoints().concat(from?[{...from,me:true}]:[]).concat(here?[here]:[])); renderLmList($("lmRunList"), from); }
   }
   renderFlares();
   renderFeed();
+  renderTrackCard();
   tick();
 }
 
@@ -1420,6 +1476,8 @@ function tally(field){
 function renderEnd(){
   $("againCard").hidden = pastMode();
   renderHist("End");
+  if (geoWatch!=null) stopGeo();
+  renderReplay();
   const res = outcome();
   const together = allTogether();
   const banner=$("resBanner");
@@ -1446,9 +1504,12 @@ function renderEnd(){
   $("aiStoryCard").hidden = !aiAvailable();
   $("aiStory").hidden = !hasStory; if (hasStory) renderStory($("aiStory"), story.text);
   $("aiStoryHint").hidden = hasStory; $("btnStory").hidden = hasStory || ghostHidden();
-  if (ghostHidden() && !hasStory) $("aiStoryHint").textContent = "AIゴーストの正解を発表すると、物語を書いてもらえるようになります。";
+  $("aiStoryHint").textContent = ghostHidden() && !hasStory ? "AIゴーストの正解を発表すると、物語を書いてもらえるようになります。" : "このゲームの全記録（誰がどの絵文字をいつ送ったか、合流、のろし、結果）をClaudeに渡して、答え合わせの物語と一人ひとりへの一言を書いてもらいます。誰かが1回押せば全員に表示されます。";
   renderGhostCard();
-  $("btnStory").disabled = storyBusy; $("btnStory").textContent = storyBusy ? "生成中…（30秒ほどかかります）" : "Claudeに物語を書いてもらう";
+  const pend = !!(story && !story.text && story.pending && story.pendingAt && nowMs()-story.pendingAt < 180000);
+  const pendOther = pend && story.by!==myPid;
+  $("btnStory").disabled = storyBusy || pend;
+  $("btnStory").textContent = storyBusy ? "生成中…（30〜60秒かかります。画面を閉じずにお待ちください）" : pendOther ? `生成中…（${nameOf(story.by)!=="?" ? nameOf(story.by)+"の端末" : "別の端末"}で実行中。終わると全員に表示されます）` : "Claudeに物語を書いてもらう";
   // 表彰
   const live=liveMsgs(); const byId=Object.fromEntries(live.map(x=>[x.id,x]));
   const setAward = (eId,byIdEl,t) => {
@@ -1559,12 +1620,13 @@ function tick(){
     }
   } else $("clock").textContent = "";
 }
-setInterval(()=>{ if(game){ tick(); if ((++tickCount)%10===0){ maybeLive().catch(e=>console.warn(e)); maybeGhost().catch(e=>console.warn(e)); } } }, 1000);
+setInterval(()=>{ if(game){ tick(); if ((++tickCount)%5===0) trackTick(); if (tickCount%10===0){ maybeLive().catch(e=>console.warn(e)); maybeGhost().catch(e=>console.warn(e)); } } }, 1000);
 
 /* ---------- データ購読 ---------- */
 function attach(g){
   unsubs.forEach(u=>{try{u()}catch(e){}}); unsubs=[];
   gid=g; game=null; players=[]; msgs=[]; events=[]; flares=[]; votes=[]; aiDocs=[]; gvotes=[]; liveTried={}; ghostTried={}; seenMsgIds=new Set(); seenFlareIds=new Set(); warnedSlot=-1; sending=false; prevKey="";
+  resetTrackState(); if (geoWatch!=null) stopGeo();
   if (!g){ ready=true; return render(); }
   ready=false; render();
   const onErr = e => { console.warn(e); };
@@ -1599,8 +1661,8 @@ async function createGame(carry){
   if (pastMode()) fail("過去のゲームを見ています。「いまのゲームに戻る」を押してから操作してください。");
   if (game && gid && game.status!=="lobby" && phase()!=="ended"){ try { await db.doc(G()).update({aborted:true}); } catch(e){ console.warn(e); } }
   const id = "g" + nowMs().toString(36) + Math.random().toString(36).slice(2,6);
-  const base = game ? {area:areaOf(game), move:game.move||"walk", durationMin:game.durationMin, intervalMin:game.intervalMin, anon:game.anon||"lane", spurt:!!game.spurt, flare:!!game.flare, ghost:!!game.ghost, lm:(game.lm==null?7:game.lm), lmMode:(game.lmMode==="cat"?"cat":"unique"), penalty:game.penalty||"", ngExtra:game.ngExtra||"", aiLive:game.aiLive!==false, test:!!game.test}
-                    : {area:"random", move:"walk", durationMin:120, intervalMin:5, anon:"lane", spurt:false, flare:false, ghost:false, lm:7, lmMode:"unique", penalty:"", ngExtra:"", aiLive:true, test:false};
+  const base = game ? {area:areaOf(game), move:game.move||"walk", durationMin:game.durationMin, intervalMin:game.intervalMin, anon:game.anon||"lane", spurt:!!game.spurt, flare:!!game.flare, track:!!game.track, ghost:!!game.ghost, lm:(game.lm==null?7:game.lm), lmMode:(game.lmMode==="cat"?"cat":"unique"), penalty:game.penalty||"", ngExtra:game.ngExtra||"", aiLive:game.aiLive!==false, test:!!game.test}
+                    : {area:"random", move:"walk", durationMin:120, intervalMin:5, anon:"lane", spurt:false, flare:false, track:false, ghost:false, lm:7, lmMode:"unique", penalty:"", ngExtra:"", aiLive:true, test:false};
   const keep = carry ? players.filter(p=>!p.bot || base.test).map(p=>({id:p.id,name:p.name,joinedAt:p.joinedAt||nowMs(),bot:!!p.bot,rc:p.rc||randCode(6)})) : [];
   await db.doc(`rooms/${room}/games/${id}`).set({...base, status:"lobby", createdAt:nowMs()});
   for (const p of keep) await db.doc(`rooms/${room}/games/${id}/players/${p.id}`).set({name:p.name, joinedAt:p.joinedAt, bot:p.bot, rc:p.rc});
@@ -1611,7 +1673,7 @@ async function createGame(carry){
 /* ---------- 操作 ---------- */
 async function guard(errId, fn){
   try { setErr(errId,""); await fn(); }
-  catch(e){ setErr(errId, e && e.userMsg ? e.userMsg : (e && e.code==="invalid_argument" ? "書き込み権限がありません。編集者として招待されたアカウントで開いてください。" : "うまく保存できませんでした。少し待ってもう一度試してください。")); console.warn(e); }
+  catch(e){ setErr(errId, e && e.userMsg ? e.userMsg : (e && e.code==="invalid_argument" ? "書き込み権限がありません。編集者として招待されたアカウントで開いてください。" : `うまく保存できませんでした。少し待ってもう一度試してください。${e && e.message ? "（"+String(e.message).slice(0,80)+"）" : ""}`)); console.warn(e); }
 }
 const fail = msg => { const e=new Error(msg); e.userMsg=msg; throw e; };
 const confirmPair = (openBtn, box, noBtn) => { $(openBtn).onclick=()=>{ $(box).hidden=false; $(openBtn).hidden=true; }; $(noBtn).onclick=()=>{ $(box).hidden=true; $(openBtn).hidden=false; }; };
@@ -1635,6 +1697,7 @@ saveSetting("setInt","intervalMin",el=>Number(el.value));
 saveSetting("setAnon","anon",el=>el.value);
 saveSetting("setSpurt","spurt",el=>el.checked);
 saveSetting("setFlare","flare",el=>el.checked);
+saveSetting("setTrack","track",el=>el.checked);
 saveSetting("setAiLive","aiLive",el=>el.checked);
 saveSetting("setGhost","ghost",el=>el.checked);
 saveSetting("setLm","lm",el=>Number(el.value));
@@ -1661,7 +1724,7 @@ $("actSel").addEventListener("change", () => {
   setErr("errSend",""); setErr("errMerge",""); setErr("errFlare",""); render();
 });
 $("btnSkipStart").onclick = () => guard("errTest", () => db.doc(G()).update({startAt:nowMs(), endAt:nowMs()+game.durationMin*60000}));
-$("btnSkipEnd").onclick = () => guard("errTest", () => db.doc(G()).update({endAt:nowMs()}));
+$("btnSkipEnd").onclick = () => guard("errTest", async () => { ensureTracksSub(); await synthTracks(); await db.doc(G()).update({endAt:nowMs()}); });
 
 function plannedStart(){
   if (isTest()) return nowMs()+15000;
@@ -2024,20 +2087,28 @@ function storyPayload(){
     result: outcome().map(g=>({members:g.members.map(p=>p.name), size:g.members.length, res:g.res})),
     penalty: game.penalty||"",
     landmarks: lmList().map(l=>({e:l.e, n:l.n})),
+    track: trackSummaryForStory(),
     awards: { best: awardInfo("best"), worst: awardInfo("worst") }
   };
 }
 $("btnStory").onclick = () => guard("errStory", async () => {
   if (!aiAvailable()) fail("AIの設定がありません。");
   const ref=db.doc(G("ai/story"));
-  const lease=await ref.acquire({holder:myPid, ttlMs:90000});
-  if (!lease.acquired) fail("ほかの人が生成中です。少し待つと表示されます。");
+  const lease=await ref.acquire({holder:myPid, ttlMs:180000});
+  if (!lease.acquired) fail("ほかの人の端末で生成中です。終わると全員に表示されます（最大3分）。");
   const cur=await ref.get(); if (cur.exists && cur.data() && cur.data().text) return;
   storyBusy=true; render();
+  try { await ref.set({...((cur.exists && cur.data()) || {}), pending:true, pendingAt:nowMs(), by:myPid}); } catch(e){ console.warn(e); }
+  let ok=false;
   try {
     const text=await callAi("story", storyPayload());
     await ref.set({text:String(text).trim().slice(0,6000), at:nowMs(), by:myPid});
-  } finally { storyBusy=false; render(); }
+    ok=true;
+  } finally {
+    storyBusy=false;
+    if (!ok){ try { await ref.set({pending:false, by:myPid, failedAt:nowMs()}); } catch(e){ console.warn(e); } }   // ロックを解放して、ほかの人がすぐ再試行できるように
+    render();
+  }
 });
 
 /* ---------- 起動 ---------- */
@@ -2057,6 +2128,209 @@ async function boot(){
   if (/^[A-Z0-9]{4,8}$/.test(r)) enterRoom(r,false); else { ready=true; render(); }
 }
 boot();
+
+/* ---------- 位置情報の記録と軌跡リプレイ（オプション） ---------- */
+let tracks=[], tracksUnsub=null, geoPolling=false, geoWatch=null, geoLast=null, geoState="idle", myPts=null, lastSaveAt=0, trackSaving=false, replayF=1, replayTimer=null, replaySig="";
+const TRACK_SAVE_MS=30000, TRACK_MIN_MOVE_KM=0.015, TRACK_MAX_ACC=150, TRACK_MAX_PTS=720, NEAR_M=100, ARRIVE_M=120;
+const trackOn = () => !!(game && game.track);
+function distKm(a,b){ const R=6371, dLat=(b.lat-a.lat)*Math.PI/180, dLng=(b.lng-a.lng)*Math.PI/180, la=a.lat*Math.PI/180, lb=b.lat*Math.PI/180; const h=Math.sin(dLat/2)**2+Math.cos(la)*Math.cos(lb)*Math.sin(dLng/2)**2; return 2*R*Math.asin(Math.min(1,Math.sqrt(h))); }
+const mySelf = () => players.find(p=>p.id===myPid && !p.bot && !p.ghost);
+
+function resetTrackState(){ tracks=[]; if (tracksUnsub){ try{ tracksUnsub(); }catch(e){} tracksUnsub=null; } myPts=null; lastSaveAt=0; trackSaving=false; replayF=1; replaySig=""; stopReplay(); }
+function ensureTracksSub(){
+  if (tracksUnsub || !gid || !db) return;
+  tracksUnsub = db.collection(G("tracks")).onSnapshot(s=>{ tracks=s.docs.map(d=>({id:d.id,...d.data()})); if (ready) render(); }, e=>console.warn(e));
+}
+
+/* --- 記録（自分の端末だけ） --- */
+function startGeo(){
+  if (!navigator.geolocation){ geoState="unsupported"; return renderTrackCard(); }
+  if (geoWatch!=null){ if (geoState==="on"||geoState==="waiting") return; stopGeo(false); }
+  geoState="waiting"; renderTrackCard();
+  geoWatch = navigator.geolocation.watchPosition(pos=>{
+    geoLast={t:nowMs(), lat:pos.coords.latitude, lng:pos.coords.longitude, acc:pos.coords.accuracy||999};
+    if (geoState!=="on"){ geoState="on"; store.set("shugo.geo","1"); renderTrackCard(); }
+  }, err=>{
+    // 1=拒否 → 停止。2=取得不能・3=タイムアウト は一時的なことが多いので監視は続ける（立ち止まっているだけでも3が来る端末がある）
+    if (err && err.code===1){ geoState="denied"; store.del("shugo.geo"); stopGeo(false); renderTrackCard(); return; }
+    if (geoState!=="on"){ geoState="error"; renderTrackCard(); }
+  }, {enableHighAccuracy:true, maximumAge:10000});
+}
+function stopGeo(reset){ if (geoWatch!=null){ try{ navigator.geolocation.clearWatch(geoWatch); }catch(e){} } geoWatch=null; if (reset!==false) geoState="idle"; }
+async function maybeSaveTrack(){
+  if (!trackOn() || lastPhase!=="running" || pastMode() || !geoLast || trackSaving || !db) return;
+  const m=mySelf(); if (!m || m.retired) return;
+  const now=nowMs(); if (now-geoLast.t>90000 || geoLast.acc>TRACK_MAX_ACC) return;
+  if (myPts===null){
+    trackSaving=true;
+    try { const s=await db.doc(G("tracks/"+m.id)).get(); myPts = (s.exists && s.data() && Array.isArray(s.data().pts)) ? s.data().pts : []; }
+    catch(e){ console.warn(e); myPts=[]; } finally { trackSaving=false; }
+  }
+  const last=myPts[myPts.length-1];
+  if (last && now-lastSaveAt < TRACK_SAVE_MS) return;
+  const moved = !last || distKm({lat:last[1],lng:last[2]}, geoLast) >= TRACK_MIN_MOVE_KM;
+  if (last && !moved && now-last[0] < 120000) return;
+  myPts.push([Math.round(geoLast.t), +geoLast.lat.toFixed(5), +geoLast.lng.toFixed(5), Math.round(geoLast.acc)]);
+  if (myPts.length>TRACK_MAX_PTS) myPts = myPts.filter((_,i)=>i%2===0 || i===myPts.length-1);
+  lastSaveAt=now; trackSaving=true;
+  try { await db.doc(G("tracks/"+m.id)).set({pts:myPts, n:myPts.length, updatedAt:now}); } catch(e){ console.warn(e); } finally { trackSaving=false; }
+  renderTrackCard();
+}
+function renderTrackCard(){
+  const card=$("trackCard"); if (!card) return;
+  const m=mySelf();
+  const on = trackOn() && !!m && !m.retired && (lastPhase==="assigned"||lastPhase==="running") && !pastMode();
+  card.hidden=!on; if (!on) return;
+  const n = myPts ? myPts.length : 0;
+  const msg = {
+    idle: lastPhase==="running" ? "まだ記録していません。「記録を開始する」を押して、位置情報を許可してください。" : "開始前に押しておくと、位置情報の許可ダイアログを済ませておけます（記録が始まるのは開始時刻からです）。",
+    waiting: "位置情報の許可を待っています…（ダイアログで「許可」を選んでください）",
+    on: lastPhase==="running" ? `記録中：${n}点` + (geoLast ? `（最終 ${hm(geoLast.t)}、誤差±${Math.round(geoLast.acc)}m）` : "（最初の位置を取得中…）") : "許可されました。開始時刻になると自動で記録が始まります。",
+    denied: "位置情報が拒否されています。ブラウザの設定（このサイトの権限）で位置情報を許可してから、もう一度押してください。",
+    error: "位置情報を取得できませんでした。電波の良い場所でもう一度押してください。",
+    unsupported: "この端末のブラウザは位置情報に対応していません。",
+  }[geoState] || "";
+  $("trackState").textContent = msg;
+  $("btnTrackStart").hidden = geoState==="on" || geoState==="waiting" || geoState==="unsupported";
+}
+$("btnTrackStart").onclick = () => startGeo();
+function trackTick(){
+  if (!game) return;
+  if (!trackOn() || pastMode() || !(lastPhase==="assigned"||lastPhase==="running")){ if (geoWatch!=null) stopGeo(); return; }
+  const m=mySelf(); if (!m || m.retired){ if (geoWatch!=null) stopGeo(); return; }
+  if (geoWatch==null && geoState==="idle" && store.get("shugo.geo")==="1") startGeo();   // 前に許可済みなら自動で再開
+  // watchPosition が止まる端末があるので、25秒以上更新がなければ自分から取りに行く
+  if (geoState==="on" && navigator.geolocation && (!geoLast || nowMs()-geoLast.t>25000) && !geoPolling){
+    geoPolling=true;
+    navigator.geolocation.getCurrentPosition(pos=>{ geoPolling=false; geoLast={t:nowMs(), lat:pos.coords.latitude, lng:pos.coords.longitude, acc:pos.coords.accuracy||999}; }, ()=>{ geoPolling=false; }, {enableHighAccuracy:true, maximumAge:5000, timeout:20000});
+  }
+  if (lastPhase==="running") maybeSaveTrack().catch(e=>console.warn(e));
+}
+
+/* --- 分析 --- */
+function trackPlayers(){
+  return tracks.filter(t=>Array.isArray(t.pts) && t.pts.length>1)
+    .map(t=>({ id:t.id, p:players.find(x=>x.id===t.id), pts:t.pts.filter(q=>Array.isArray(q) && (q[3]==null || q[3]<=TRACK_MAX_ACC)).map(q=>({t:q[0],lat:q[1],lng:q[2]})).sort((a,b)=>a.t-b.t) }))
+    .filter(t=>t.p && t.pts.length>1);
+}
+function posAt(pts, t){
+  if (!pts.length || t<pts[0].t-120000 || t>pts[pts.length-1].t+120000) return null;
+  let i=0; while (i<pts.length && pts[i].t<=t) i++;
+  if (i===0) return pts[0]; if (i>=pts.length) return pts[pts.length-1];
+  const a=pts[i-1], b=pts[i]; if (b.t-a.t>300000) return null;
+  const f=(t-a.t)/(b.t-a.t); return {lat:a.lat+(b.lat-a.lat)*f, lng:a.lng+(b.lng-a.lng)*f, t};
+}
+function groupFinder(t){
+  const parent={}; const find=x=>{ while (parent[x]!=null && parent[x]!==x) x=parent[x]; return x; };
+  for (const e of events.filter(e=>e.type==="merge" && e.at<=t).sort((a,b)=>a.at-b.at)){
+    const ids=[...(e.a||[]),...(e.b||[])]; if (!ids.length) continue; const root=find(ids[0]);
+    for (const id of ids){ const r=find(id); if (r!==root) parent[r]=root; }
+  }
+  return find;
+}
+function walkKm(pts){ let d=0; for (let i=1;i<pts.length;i++){ const s=distKm(pts[i-1],pts[i]); if (pts[i].t-pts[i-1].t<=300000 && s<1) d+=s; } return d; }
+function nearMisses(tp){
+  const out=[], step=30000, start=game.startAt, end=Math.min(game.endAt, nowMs());
+  for (let i=0;i<tp.length;i++) for (let j=i+1;j<tp.length;j++){
+    let cur=null;
+    const close = () => { if (cur){ out.push(cur); cur=null; } };
+    for (let t=start;t<=end;t+=step){
+      const a=posAt(tp[i].pts,t), b=posAt(tp[j].pts,t); if (!a||!b){ close(); continue; }
+      const f=groupFinder(t); if (f(tp[i].id)===f(tp[j].id)){ close(); continue; }
+      const d=distKm(a,b)*1000;
+      if (d<=NEAR_M){ if (!cur) cur={a:tp[i].p, b:tp[j].p, from:t, to:t, min:d, at:t}; else { cur.to=t; if (d<cur.min){ cur.min=d; cur.at=t; } } }
+      else close();
+    }
+    close();
+  }
+  return out.sort((x,y)=>x.at-y.at);
+}
+function arrivals(tp){
+  const out=[];
+  for (const t of tp) for (const l of lmList()){ const hit=t.pts.find(q=>distKm(q,l)*1000<=ARRIVE_M); if (hit) out.push({p:t.p, lm:l, at:hit.t}); }
+  return out.sort((a,b)=>a.at-b.at);
+}
+const trackColor = (p, i) => (isLane() && p.lane!=null) ? laneCss(p.lane) : ["#c0392b","#e67e22","#b7950b","#27ae60","#2980b9","#8e44ad","#d35400","#16a085"][i%8];
+
+/* --- 終了後のリプレイ --- */
+function renderReplay(){
+  const card=$("replayCard"); if (!card) return;
+  if (!trackOn() || !game.wardResolved){ card.hidden=true; return; }
+  ensureTracksSub();
+  const tp=trackPlayers();
+  card.hidden=false;
+  $("replayEmpty").hidden = tp.length>0; $("replayBody").hidden = !tp.length;
+  if (!tp.length) return;
+  const start=game.startAt, end=Math.max(start+60000, Math.min(game.endAt, Math.max(...tp.map(t=>t.pts[t.pts.length-1].t))));
+  const T = start + (end-start)*replayF;
+  $("trackTime").textContent = hm(T) + (replayF>=1 ? "（最後まで）" : "");
+  $("trackSlider").value = String(Math.round(replayF*1000));
+  const lines=[], pts=lmPoints().map(p=>({...p, small:true}));
+  tp.forEach((t,i)=>{
+    const col=trackColor(t.p,i);
+    const seg=t.pts.filter(q=>q.t<=T); const head=posAt(t.pts,T);
+    if (head) seg.push(head);
+    if (seg.length>1) lines.push({pts:seg, color:col});
+    if (t.p.lat!=null) pts.push({lat:t.p.lat,lng:t.p.lng,color:col});
+    if (head) pts.push({...head, head:true, color:col, label:t.p.name});
+  });
+  for (const x of liveMsgs().filter(x=>x.at<=T)){
+    const sid=(x.senders||[])[0]; const t=tp.find(y=>y.id===sid); if (!t) continue;
+    const pos=posAt(t.pts, x.at); if (pos) pts.push({...pos, emoji:graphemes(x.emojis)[0]||"", small:true});
+  }
+  drawMap($("trackMap"), game.wardResolved, pts, lines);
+  const sig = tp.map(t=>t.id+":"+t.pts.length).join("|")+":"+events.length;
+  if (replaySig===sig) return; replaySig=sig;
+  const lg=$("trackLegend"); lg.textContent="";
+  tp.forEach((t,i)=>{ const s=document.createElement("span"); const d=document.createElement("i"); d.className="sw"; d.style.background=trackColor(t.p,i); s.append(d, `${t.p.name} ${walkKm(t.pts).toFixed(1)}km（${t.pts.length}点）`); lg.appendChild(s); });
+  const nm=nearMisses(tp), ul=$("nearList"); ul.textContent="";
+  $("nearEmpty").hidden = nm.length>0;
+  for (const n of nm){ const li=document.createElement("li"); li.textContent=`${hm(n.at)} ${n.a.name} と ${n.b.name} が ${Math.round(n.min)}m まで接近（会えず）` + (n.to-n.from>=60000 ? `、約${Math.round((n.to-n.from)/60000)}分間` : ""); ul.appendChild(li); }
+  const ar=arrivals(tp), ul2=$("arriveList"); ul2.textContent=""; $("arriveWrap").hidden = !lmList().length;
+  $("arriveEmpty").hidden = ar.length>0;
+  for (const a of ar){ const li=document.createElement("li"); li.textContent=`${hm(a.at)} ${a.p.name} が ${a.lm.e} ${a.lm.n} に到着`; ul2.appendChild(li); }
+}
+function stopReplay(){ if (replayTimer){ clearInterval(replayTimer); replayTimer=null; } const b=$("btnTrackPlay"); if (b) b.textContent="▶ 再生"; }
+$("trackSlider").addEventListener("input", ()=>{ stopReplay(); replayF=Number($("trackSlider").value)/1000; renderReplay(); });
+$("btnTrackPlay").onclick = () => {
+  if (replayTimer) return stopReplay();
+  if (replayF>=1) replayF=0;
+  $("btnTrackPlay").textContent="⏸ 停止";
+  replayTimer=setInterval(()=>{ replayF=Math.min(1, replayF+1/150); renderReplay(); if (replayF>=1) stopReplay(); }, 200);
+};
+function trackSummaryForStory(){
+  if (!trackOn()) return null;
+  const tp=trackPlayers(); if (!tp.length) return null;
+  return {
+    walked: tp.map(t=>({name:t.p.name, km:+walkKm(t.pts).toFixed(1)})),
+    nearMisses: nearMisses(tp).slice(0,10).map(n=>({time:hm(n.at), a:n.a.name, b:n.b.name, m:Math.round(n.min)})),
+    arrivals: arrivals(tp).slice(0,16).map(a=>({time:hm(a.at), name:a.p.name, lm:`${a.lm.e}${a.lm.n}`}))
+  };
+}
+
+/* --- テストモード：ダミーの軌跡を作る（位置情報が取れない端末やダミー参加者のため） --- */
+async function synthTracks(){
+  if (!isTest() || !trackOn() || !game.wardResolved) return;
+  let have=new Set(tracks.map(t=>t.id));
+  try { have=new Set((await db.collection(G("tracks")).get()).docs.map(d=>d.id)); } catch(e){ console.warn(e); }
+  const ps=players.filter(p=>!p.ghost && p.lat!=null && !have.has(p.id));
+  if (!ps.length) return;
+  const lms=lmList(); const start=game.startAt, end=Math.min(nowMs(), game.endAt);
+  const targets = ps.map((p,i)=> lms.length ? lms[i % Math.max(1,Math.min(2,lms.length))] : (ps[(i+1)%ps.length]));   // 2か所に集まる→すれ違いが出やすい
+  for (let i=0;i<ps.length;i++){
+    const p=ps[i], tg=targets[i]; const pts=[]; let cur={lat:p.lat,lng:p.lng};
+    const total=Math.max(1,(end-start)/30000);
+    const stepKm=Math.max(0.035, distKm(cur,tg)/(total*0.7));   // 実際は30秒で35m（時速4.2km）だが、テストでは時間内に着くよう速める
+    for (let k=0;k<=total;k++){
+      const t=start+k*30000; if (t>end) break;
+      pts.push([Math.round(t), +cur.lat.toFixed(5), +cur.lng.toFixed(5), 20+Math.round(Math.random()*30)]);
+      const d=distKm(cur,tg);
+      if (d>0.02){ const f=Math.min(1, stepKm/d); cur={lat:cur.lat+(tg.lat-cur.lat)*f+(Math.random()-0.5)*0.0002, lng:cur.lng+(tg.lng-cur.lng)*f+(Math.random()-0.5)*0.0002}; }
+    }
+    await db.doc(G("tracks/"+p.id)).set({pts, n:pts.length, updatedAt:nowMs(), synthetic:true});
+  }
+}
+window.__geo = () => ({geoLast, geoState, myPts, lastSaveAt, geoWatch, geoPolling});
 </script>
 </body>
 </html>
